@@ -13,6 +13,11 @@ var (
 	addressFlag = flag.String("tcp", "127.0.0.1:8080", "TCP service address")
 )
 
+var filters = []Filter{
+	&pruneFilter{BlacklistNames: []string{"secret"}},
+	&cloneFilter{Clones: []string{"Mini Me"}},
+}
+
 func main() {
 	flag.Parse()
 
@@ -25,14 +30,14 @@ func main() {
 	}
 }
 
-func startListener(addr string) <-chan map[string]interface{} {
+func startListener(addr string) <-chan Event {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatalf("Failed to open listener: %s\n", err)
 	}
 	log.Printf("Listening on: %s\n", addr)
 
-	out := make(chan map[string]interface{})
+	out := make(chan Event)
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -40,10 +45,10 @@ func startListener(addr string) <-chan map[string]interface{} {
 				log.Printf("Connect failed: %s\n", err)
 			}
 
+			// For each connection, read JSON from in
+			// stream, and write the filtered results to
+			// the output channel.
 			go func() {
-				log.Printf("Streaming input from %s", conn.RemoteAddr())
-
-				// Read
 				if err := readAll(conn, out); err == io.EOF {
 					log.Printf("Connection from %s closed", conn.RemoteAddr())
 				} else if err != nil {
@@ -57,13 +62,34 @@ func startListener(addr string) <-chan map[string]interface{} {
 	return out
 }
 
-func readAll(r io.Reader, out chan<- map[string]interface{}) error {
+func readAll(r io.Reader, out chan<- Event) error {
+	in := make(chan Event)
+	defer close(in)
+
+	// Start a pipeline that filters events between in and
+	// out. These are created per-connection.
+	startFilters(filters, in, out)
+
+	// For each event read from the connection, pass it to the
+	// filter pipeline.
 	dec := json.NewDecoder(r)
 	for {
-		var v map[string]interface{}
+		var v Event
 		if err := dec.Decode(&v); err != nil {
 			return err
 		}
-		out <- v
+		in <- v
 	}
+}
+
+func startFilters(filters []Filter, in <-chan Event, out chan<- Event) {
+	for _, filter := range filters {
+		in = startFilter(filter, in)
+	}
+	go func() {
+		for event := range in {
+			out <- event
+		}
+		log.Print("closing channel for filter set")
+	}()
 }
