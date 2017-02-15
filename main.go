@@ -1,60 +1,69 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
 )
 
 var (
-	Address = flag.String("tcp", "127.0.0.1:8080", "TCP service address")
+	addressFlag = flag.String("tcp", "127.0.0.1:8080", "TCP service address")
 )
 
 func main() {
 	flag.Parse()
 
-	listener, err := net.Listen("tcp", *Address)
+	out := startListener(*addressFlag)
+
+	// Simply stream all output to the console.
+	enc := json.NewEncoder(os.Stdout)
+	for v := range out {
+		enc.Encode(v)
+	}
+}
+
+func startListener(addr string) <-chan map[string]interface{} {
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatalf("Failed to open listener: %s\n", err)
 	}
+	log.Printf("Listening on: %s\n", addr)
 
-	log.Printf("Listening on: %s\n", *Address)
+	out := make(chan map[string]interface{})
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				log.Printf("Connect failed: %s\n", err)
+			}
 
+			go func() {
+				log.Printf("Streaming input from %s", conn.RemoteAddr())
+
+				// Read
+				if err := readAll(conn, out); err == io.EOF {
+					log.Printf("Connection from %s closed", conn.RemoteAddr())
+				} else if err != nil {
+					log.Printf("Error decoding input from %s: %s", conn.RemoteAddr(), err)
+				}
+
+				conn.Close()
+			}()
+		}
+	}()
+	return out
+}
+
+func readAll(r io.Reader, out chan<- map[string]interface{}) error {
+	dec := json.NewDecoder(r)
 	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			log.Printf("Connect failed: %s\n", err)
+		var v map[string]interface{}
+		if err := dec.Decode(&v); err != nil {
+			return err
 		}
-
-		file, err := ioutil.TempFile(os.TempDir(), "dumbledore")
-		if err != nil {
-			log.Printf("Failed to open file: %s\n", err)
-		}
-
-		log.Printf("Streaming input from %s to %s", conn.RemoteAddr(), file.Name())
-
-		go func() {
-			defer file.Close()
-			defer conn.Close()
-
-			pipe := &Pipe{source: conn, dest: file}
-			pipe.transfer()
-		}()
-	}
-}
-
-type Pipe struct {
-	source io.Reader
-	dest   io.WriteCloser
-}
-
-func (p *Pipe) transfer() {
-	defer p.dest.Close()
-
-	if _, err := io.Copy(p.dest, p.source); err != nil {
-		log.Printf("Copy failed: %s\n", err)
+		out <- v
 	}
 }
