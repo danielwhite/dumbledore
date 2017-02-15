@@ -1,0 +1,44 @@
+#!/bin/bash
+#
+# A wrapper for make that runs within a Docker container.
+#
+if [ $# == 0 ]; then
+    echo "Usage: $(basename $0) [options] [target] ..."
+    exit 1
+fi
+
+# Utility to join one or more arguments (e.g. join_by ":" 1 2 3)
+function join_by { IFS=$1; shift; echo "$*"; }
+
+# Get the Docker mount associated with a Go workspace.
+function docker_dir() {
+    for path in "$@"; do
+        printf "/%s\n" $(basename $path)
+    done
+}
+
+# Get the GOPATH for the Docker container.
+function gopath() {
+    join_by ":" $(docker_dir "$@")
+}
+
+# Get the volume arguments for each Go workspace.
+function volumes() {
+    for path in "$@"; do
+        printf -- "-v %s:%s\n" $path $(docker_dir $path)
+    done
+}
+
+# If we have multiple workspaces, this provides an array to work with.
+IFS=':' read -r -a WORKSPACES <<< "$GOPATH"
+
+IMAGE="$REGISTRY"build
+HOST_SRC=$(go list -f '{{.Root}}')
+
+docker build -t ${IMAGE}:build -f Dockerfile.build .
+docker run --rm  \
+     $(volumes "${WORKSPACES[@]}") \
+     -e GOPATH=$(gopath "${WORKSPACES[@]}") \
+     -w "$(docker_dir ${HOST_SRC})/src/$(go list)" \
+     ${IMAGE}:build \
+     /usr/bin/make $@
